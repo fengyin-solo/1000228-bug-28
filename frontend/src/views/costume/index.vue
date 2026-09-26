@@ -12,7 +12,16 @@
     </header>
 
     <div class="stat-row">
-      <article v-for="item in stats" :key="item.label" class="stat-card">
+      <article
+        v-for="item in stats"
+        :key="item.label"
+        class="stat-card clickable"
+        :class="{ active: activeStatus === item.status }"
+        role="button"
+        tabindex="0"
+        @click="toggleStatus(item.status)"
+        @keydown.enter="toggleStatus(item.status)"
+      >
         <span class="stat-label">{{ item.label }}</span>
         <strong class="stat-value">{{ item.value }}</strong>
       </article>
@@ -22,6 +31,13 @@
       <label v-for="field in filterFields" :key="field" class="filter-item">
         <span>{{ field }}</span>
         <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      </label>
+      <label class="filter-item">
+        <span>当前状态</span>
+        <select v-model="activeStatus">
+          <option value="">全部状态</option>
+          <option v-for="status in statuses" :key="status" :value="status">{{ status }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -43,6 +59,7 @@
               :key="action"
               class="link"
               type="button"
+              :disabled="acting"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -65,24 +82,34 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { request } from '@/api/client'
+import { fetchJson, request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type StatItem = { label: string; status: string; value: number }
+type ActionPayload = { ok: boolean; message?: string }
 
 const ENDPOINT = '/api/costume'
 const columns = ["服装编号", "服装名称", "角色归属", "尺码规格", "造型师", "使用场次", "当前状态", "清洗记录"]
 const actions = ["安排定妆", "确认使用", "归还服装"]
 const statuses = ["待定妆", "已定妆", "使用中", "已归还"]
-const stats = [{"label": "待定妆服装", "value": 0}, {"label": "使用中服装", "value": 0}, {"label": "待清洗服装", "value": 0}]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const stats = ref<StatItem[]>([])
+const activeStatus = ref('')
+const acting = ref(false)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = columns.slice(0, 1)
 
 function resetFilters() {
   filters.value = {}
+  activeStatus.value = ''
+  void reload()
+}
+
+function toggleStatus(status: string) {
+  activeStatus.value = activeStatus.value === status ? '' : status
   void reload()
 }
 
@@ -95,26 +122,40 @@ function openCreate() {
 }
 
 async function runAction(action: string, row: Row) {
+  if (acting.value) {
+    return
+  }
+  acting.value = true
   errorMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('服装造型动作未生效，请稍后重试')
+    const payload = (await response.json().catch(() => null)) as ActionPayload | null
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.message || '服装造型动作未生效，请稍后重试')
     }
-    await reload()
+    await Promise.all([reload(), reloadStats()])
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '服装造型操作失败'
+  } finally {
+    acting.value = false
   }
 }
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = new URLSearchParams()
+  const keyword = (filters.value['服装编号'] ?? '').trim()
+  if (keyword) {
+    query.set('keyword', keyword)
+  }
+  if (activeStatus.value) {
+    query.set('status', activeStatus.value)
+  }
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${query.toString()}`)
     if (!response.ok) {
       throw new Error('戏服列表读取失败')
     }
@@ -126,5 +167,17 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+async function reloadStats() {
+  try {
+    const payload = await fetchJson<{ stats: StatItem[] }>(`${ENDPOINT}/stats`)
+    stats.value = payload.stats ?? []
+  } catch {
+    stats.value = []
+  }
+}
+
+onMounted(() => {
+  void reload()
+  void reloadStats()
+})
 </script>
