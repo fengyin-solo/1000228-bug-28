@@ -1,6 +1,7 @@
 """服装造型业务规则：状态流转、字段校验与筛选口径都收在这里。"""
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from app.store import store
@@ -9,7 +10,18 @@ MODULE = "costume"
 REQUIRED_FIELDS = ["服装编号", "服装名称", "角色归属"]
 STATUS_ORDER = ["待定妆", "已定妆", "使用中", "已归还"]
 ACTION_RULES = {"安排定妆": "已定妆", "确认使用": "使用中", "归还服装": "已归还"}
+# 每个动作只允许从指定状态发起，防止乱序操作或对同一笔归还重复处置
+SOURCE_RULES = {
+    "安排定妆": {"待定妆"},
+    "确认使用": {"已定妆"},
+    "归还服装": {"使用中"},
+}
 NEGATIVE_ACTIONS = []
+
+RETURNED_STATUS = STATUS_ORDER[-1]
+STATUS_FIELD = "当前状态"
+SCENE_FIELD = "使用场次"
+CLEAN_FIELD = "清洗记录"
 
 
 class CostumeService:
@@ -41,6 +53,9 @@ class CostumeService:
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in REQUIRED_FIELDS})
         entry["status"] = STATUS_ORDER[0]
+        entry[STATUS_FIELD] = STATUS_ORDER[0]
+        entry[SCENE_FIELD] = ""
+        entry[CLEAN_FIELD] = ""
         entry["pending"] = True
         entry["abnormal"] = False
         rows.append(entry)
@@ -55,7 +70,24 @@ class CostumeService:
         target = ACTION_RULES[action]
         if target not in STATUS_ORDER:
             return None, f"目标状态「{target}」不在允许的状态序列里"
-        entry["status"] = target
-        entry["pending"] = target != STATUS_ORDER[-1]
-        entry["abnormal"] = action in NEGATIVE_ACTIONS
+
+        # 先校验、后落库：状态不允许时原样返回，失败的清洗登记不会覆盖戏服资料
+        current = str(entry.get("status") or "")
+        if current not in SOURCE_RULES[action]:
+            if current == target:
+                return None, f"戏服当前为「{target}」，请勿重复{action}"
+            return None, f"戏服当前为「{current}」，不能执行{action}"
+
+        updates: dict[str, Any] = {
+            "status": target,
+            STATUS_FIELD: target,
+            "pending": target != RETURNED_STATUS,
+            "abnormal": action in NEGATIVE_ACTIONS,
+        }
+        if action == "归还服装":
+            # 归还后清空使用场次，另起一条不携带旧场次的清洗登记
+            updates[SCENE_FIELD] = ""
+            updates[CLEAN_FIELD] = f"{date.today().isoformat()} 归还登记，待清洗"
+
+        entry.update(updates)
         return entry, f"戏服已{action}"
